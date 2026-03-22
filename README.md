@@ -2,7 +2,7 @@
 
 A native macOS app to mirror, control, and manage Android devices from your Mac — built on top of [scrcpy](https://github.com/Genymobile/scrcpy) and ADB.
 
-> **License:** Proprietary — All Rights Reserved. Source code is visible for evaluation purposes only. See [LICENSE](LICENSE) for full terms.
+> **License:** GPLv3 — Free and open source. See [LICENSE](LICENSE) for full terms.
 
 ---
 
@@ -153,8 +153,6 @@ MacDroidControl launches scrcpy as an external process and does not modify or re
 
 ## License
 
-Copyright (c) 2026 Dante. All Rights Reserved.
+GNU General Public License v3.0 (GPL-3.0) — Copyright (c) 2026 Dante.
 
-This software is proprietary. The source code is made available for viewing and evaluation purposes only. You may not copy, modify, distribute, or use any part of this code in your own projects without explicit written permission from the author.
-
-See the [LICENSE](LICENSE) file for full terms.
+Free to use, modify, and distribute. See the [LICENSE](LICENSE) file for full terms.
