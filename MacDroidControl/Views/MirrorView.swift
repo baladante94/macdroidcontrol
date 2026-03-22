@@ -42,14 +42,14 @@ struct MirrorView: View {
                     .padding(.bottom, 22)
 
                 // MARK: Active Session Banner
-                if sessionVM.isRunning(for: device.id) || sessionVM.isApplyingConfig(for: device.id) {
+                if sessionVM.isRunning(for: device.id) {
                     activeSessionBanner
                         .padding(.bottom, 24)
                 }
 
-                // MARK: scrcpy availability warning
+                // MARK: scrcpy install card
                 if !sessionVM.scrcpyAvailable {
-                    InlineError(message: "scrcpy not found. Install via: brew install scrcpy")
+                    ScrcpyInstallCard(sessionVM: sessionVM)
                         .padding(.bottom, 16)
                 }
 
@@ -385,22 +385,15 @@ struct MirrorView: View {
     private var activeSessionBanner: some View {
         HStack(spacing: 14) {
             HStack(spacing: 8) {
-                if sessionVM.isApplyingConfig(for: device.id) {
-                    ProgressView().controlSize(.small)
-                    Text("Applying…")
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                } else {
                     PulsingDot(color: Brand.green)
                     Text(sessionVM.isRecording(for: device.id) ? "Recording" : "Mirroring Active")
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(.primary)
-                }
             }
 
             Spacer()
 
-            if sessionVM.isRecording(for: device.id) && !sessionVM.isApplyingConfig(for: device.id) {
+            if sessionVM.isRecording(for: device.id) {
                 HStack(spacing: 5) {
                     Circle().fill(Brand.red).frame(width: 6, height: 6)
                     Text("REC")
@@ -431,6 +424,7 @@ struct MirrorView: View {
     // MARK: - Action Section
 
     private var actionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
         HStack(spacing: 12) {
             // Mirror card — blue→cyan gradient
             ActionCard(
@@ -454,7 +448,7 @@ struct MirrorView: View {
                 gradient: [Brand.red, Brand.orange],
                 title: sessionVM.isRecording(for: device.id) ? "Stop Recording" : "Record",
                 subtitle: sessionVM.isRecording(for: device.id)
-                    ? "Finish & open file in Finder"
+                    ? "Finish & save recording"
                     : "Record mirror · \(sessionVM.recordingFolder.lastPathComponent)"
             ) {
                 if sessionVM.isRecording(for: device.id) {
@@ -474,25 +468,33 @@ struct MirrorView: View {
                 sessionVM.takeScreenshot(for: device, deviceVM: deviceVM)
             }
         }
+
+        if let msg = sessionVM.screenshotFeedback {
+            ActionFeedbackBanner(message: msg, icon: "camera.fill", color: Brand.purple)
+        }
+        if let msg = sessionVM.recordingFeedback {
+            ActionFeedbackBanner(message: msg, icon: "checkmark.circle.fill", color: Brand.red)
+        }
+        }
     }
 
     // MARK: - General Config Grid (USB + Wireless)
 
     private var generalConfigGrid: some View {
         configCard {
-            accentConfigRow(label: "Always on Top", help: "Mirror window stays above all other windows", accentColor: Brand.blue) {
+            accentConfigRow(label: "Always on Top", help: "Mirror window stays above all other windows · Reconnects mirror instantly to apply", accentColor: Brand.blue) {
                 Toggle("", isOn: $sessionVM.config.alwaysOnTop).labelsHidden()
             }
             configDivider
-            accentConfigRow(label: "Stay Awake", help: "Keep device screen on while mirroring", accentColor: Brand.green) {
+            accentConfigRow(label: "Stay Awake", help: "Keep device screen on while mirroring · Applied instantly via ADB", accentColor: Brand.green) {
                 Toggle("", isOn: $sessionVM.config.stayAwake).labelsHidden()
             }
             configDivider
-            accentConfigRow(label: "Turn Screen Off", help: "Disable the device display during mirroring", accentColor: Brand.orange) {
+            accentConfigRow(label: "Turn Screen Off", help: "Disable the device display during mirroring · Applied instantly via ADB", accentColor: Brand.orange) {
                 Toggle("", isOn: $sessionVM.config.turnScreenOff).labelsHidden()
             }
             configDivider
-            accentConfigRow(label: "Audio", help: "Stream device audio to this Mac", accentColor: Brand.purple) {
+            accentConfigRow(label: "Audio", help: "Stream device audio to this Mac · Takes effect on next mirror start", accentColor: Brand.purple) {
                 Toggle("", isOn: $sessionVM.config.enableAudio).labelsHidden()
             }
             if sessionVM.config.enableAudio {
@@ -508,14 +510,6 @@ struct MirrorView: View {
                         .labelsHidden()
                         .frame(width: 170)
                     }
-                    HStack {
-                        Text("Mirror restarts briefly when output changes.")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                        Spacer()
-                    }
-                    .padding(.leading, 28)
-                    .padding(.bottom, 8)
                 }
             }
             configDivider
@@ -533,7 +527,7 @@ struct MirrorView: View {
 
     private var wirelessConfigGrid: some View {
         configCard {
-            accentConfigRow(label: "Max FPS", help: "Frames per second — lower reduces Wi-Fi load", accentColor: Brand.blue) {
+            accentConfigRow(label: "Max FPS", help: "Frames per second — lower reduces Wi-Fi load · Takes effect on next mirror start", accentColor: Brand.blue) {
                 Picker("", selection: $sessionVM.config.fps) {
                     Text("15 fps").tag(15)
                     Text("30 fps").tag(30)
@@ -543,7 +537,7 @@ struct MirrorView: View {
                 .frame(width: 100)
             }
             configDivider
-            accentConfigRow(label: "Bitrate", help: "Lower bitrate reduces lag on Wi-Fi", accentColor: Brand.cyan) {
+            accentConfigRow(label: "Bitrate", help: "Lower bitrate reduces lag on Wi-Fi · Takes effect on next mirror start", accentColor: Brand.cyan) {
                 Picker("", selection: $sessionVM.config.bitrate) {
                     Text("2 Mbps").tag("2M")
                     Text("4 Mbps").tag("4M")
@@ -557,7 +551,7 @@ struct MirrorView: View {
     }
 
     private func folderPicker(url: Binding<URL>) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Text(url.wrappedValue.lastPathComponent)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -576,6 +570,14 @@ struct MirrorView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            Button {
+                NSWorkspace.shared.open(url.wrappedValue)
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Show in Finder")
         }
     }
 
@@ -846,6 +848,117 @@ struct PremiumSection<Content: View>: View {
             }
             content()
         }
+    }
+}
+
+// MARK: - scrcpy Install Card
+
+private struct ScrcpyInstallCard: View {
+    @ObservedObject var sessionVM: SessionViewModel
+    @State private var showLog = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Brand.orange.opacity(0.15))
+                        .frame(width: 40, height: 40)
+                    Image(systemName: "terminal")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(Brand.orange)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("scrcpy Not Installed")
+                        .font(.callout.weight(.semibold))
+                    Text(sessionVM.brewAvailable
+                         ? "Required for mirroring and recording. Click to install automatically."
+                         : "Install Homebrew first, then run: brew install scrcpy")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if sessionVM.brewAvailable {
+                    Button {
+                        showLog = true
+                        sessionVM.installScrcpy()
+                    } label: {
+                        if sessionVM.isInstallingScrcpy {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("Installing…")
+                            }
+                        } else {
+                            Label("Install with Homebrew", systemImage: "arrow.down.circle")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(sessionVM.isInstallingScrcpy)
+                } else {
+                    Button {
+                        NSWorkspace.shared.open(URL(string: "https://brew.sh")!)
+                    } label: {
+                        Label("Get Homebrew", systemImage: "safari")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
+            // Live install log
+            if showLog && !sessionVM.installLog.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(sessionVM.installLog)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id("bottom")
+                    }
+                    .frame(height: 120)
+                    .background(Color(.textBackgroundColor).opacity(0.5),
+                                in: RoundedRectangle(cornerRadius: 8))
+                    .onChange(of: sessionVM.installLog) { _ in
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(Brand.orange.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(Brand.orange.opacity(0.25), lineWidth: 1))
+    }
+}
+
+// MARK: - Action Feedback Banner
+
+private struct ActionFeedbackBanner: View {
+    let message: String
+    let icon: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(color)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(color.opacity(0.2), lineWidth: 0.5)
+        )
+        .transition(.opacity.combined(with: .move(edge: .top)))
+        .animation(.easeInOut(duration: 0.25), value: message)
     }
 }
 

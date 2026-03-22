@@ -24,6 +24,8 @@ class ScrcpyService: ObservableObject {
     private var restartGeneration = 0
 
     var isAvailable: Bool { CommandRunner.findExecutable(executable) != nil }
+    /// PID of the running scrcpy process, used by the session layer to locate its window.
+    var processIdentifier: Int32? { process?.processIdentifier }
 
     // MARK: - Public API
 
@@ -33,21 +35,21 @@ class ScrcpyService: ObservableObject {
         lastError = message
     }
 
-    func start(deviceId: String, config: ScrcpyConfig) {
+    func start(deviceId: String, config: ScrcpyConfig, extraArgs: [String] = []) {
         guard !isRunning else { return }
         lastError = nil
         autoRestartAttempt = 0
         restartGeneration += 1
-        launchProcess(deviceId: deviceId, extraArgs: config.arguments, recording: false)
+        launchProcess(deviceId: deviceId, extraArgs: config.arguments + extraArgs, recording: false)
     }
 
-    func startRecording(deviceId: String, config: ScrcpyConfig, to url: URL) {
+    func startRecording(deviceId: String, config: ScrcpyConfig, to url: URL, extraArgs: [String] = []) {
         guard !isRunning else { return }
         lastError = nil
         autoRestartAttempt = 0
         launchProcess(
             deviceId: deviceId,
-            extraArgs: config.arguments + ["--record", url.path],
+            extraArgs: config.arguments + ["--record", url.path] + extraArgs,
             recording: true
         )
     }

@@ -247,7 +247,6 @@ class MirrorSession: ObservableObject {
             .appendingPathComponent(filename)
         _ = try? await CommandRunner.run(path: adbPath, arguments: ["-s", deviceId, "pull", remotePath, dest.path])
         _ = try? await CommandRunner.run(path: adbPath, arguments: ["-s", deviceId, "shell", "rm", remotePath])
-        NSWorkspace.shared.activateFileViewerSelecting([dest])
     }
 }
 #endif

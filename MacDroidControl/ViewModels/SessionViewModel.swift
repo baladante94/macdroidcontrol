@@ -21,9 +21,10 @@ class SessionViewModel: ObservableObject {
     @Published private(set) var audioOutputDevices: [AudioOutputDevice] = []
     @Published var selectedAudioDeviceUID: String = ""
     @Published private(set) var activeMirrors: Set<String> = []
-    @Published private(set) var applyingConfigs: Set<String> = []
     @Published private(set) var deviceInfoCache: [String: DeviceInfo] = [:]
     @Published private(set) var fetchingDeviceInfo: Set<String> = []
+    @Published private(set) var screenshotFeedback: String? = nil
+    @Published private(set) var recordingFeedback: String? = nil
 
     /// Folder where screenshots are saved.
     @Published var screenshotFolder: URL = SessionViewModel.loadFolder(key: "screenshotFolder",
@@ -64,20 +65,7 @@ class SessionViewModel: ObservableObject {
         $selectedAudioDeviceUID
             .dropFirst()
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .sink { [weak self] _ in
-                guard let self else { return }
-                self.setAudioOutputIfNeeded()
-                guard self.config.enableAudio else { return }
-                for (deviceId, service) in self.services
-                        where service.isRunning && !service.isRecording {
-                    self.applyingConfigs.insert(deviceId)
-                    let cfg = self.config
-                    service.stop {
-                        service.start(deviceId: deviceId, config: cfg)
-                        self.applyingConfigs.remove(deviceId)
-                    }
-                }
-            }
+            .sink { [weak self] _ in self?.setAudioOutputIfNeeded() }
             .store(in: &cancellables)
 
         refreshAudioDevices()
@@ -110,10 +98,50 @@ class SessionViewModel: ObservableObject {
 
     func isRunning(for deviceId: String) -> Bool  { services[deviceId]?.isRunning   ?? false }
     func isRecording(for deviceId: String) -> Bool { services[deviceId]?.isRecording ?? false }
-    func isApplyingConfig(for deviceId: String) -> Bool { applyingConfigs.contains(deviceId) }
     func errorMessage(for deviceId: String) -> String? { services[deviceId]?.lastError }
 
     var scrcpyAvailable: Bool { CommandRunner.findExecutable("scrcpy") != nil }
+    var brewAvailable:   Bool { CommandRunner.findExecutable("brew")   != nil }
+
+    @Published private(set) var isInstallingScrcpy = false
+    @Published private(set) var installLog: String = ""
+
+    func installScrcpy() {
+        guard !isInstallingScrcpy, let brewPath = CommandRunner.findExecutable("brew") else { return }
+        isInstallingScrcpy = true
+        installLog = "Running: brew install scrcpy\n\n"
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: brewPath)
+            process.arguments = ["install", "scrcpy"]
+            process.environment = CommandRunner.defaultEnvironment
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError  = pipe
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+                Task { @MainActor [weak self] in self?.installLog += text }
+            }
+            do {
+                try process.run()
+                process.waitUntilExit()
+                pipe.fileHandleForReading.readabilityHandler = nil
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.isInstallingScrcpy = false
+                    self.objectWillChange.send()
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.installLog += "\nError: \(error.localizedDescription)"
+                    self.isInstallingScrcpy = false
+                }
+            }
+        }
+    }
 
     // MARK: - Mirror
 
@@ -154,7 +182,6 @@ class SessionViewModel: ObservableObject {
         recordingURLs.removeValue(forKey: deviceId)
         let service = getService(for: deviceId)
         service.stop()
-        applyingConfigs.remove(deviceId)
         syncActiveMirrors()
         Task {
             _ = try? await CommandRunner.run(executable: "adb",
@@ -175,9 +202,10 @@ class SessionViewModel: ObservableObject {
             "recording_\(Int(Date().timeIntervalSince1970)).mp4"
         )
         recordingURLs[deviceId] = url
+        let geomArgs = windowGeometryArgs(for: service)
         // Stop the current mirror (if running) then relaunch with --record.
         service.stop {
-            service.startRecording(deviceId: deviceId, config: cfg, to: url)
+            service.startRecording(deviceId: deviceId, config: cfg, to: url, extraArgs: geomArgs)
         }
     }
 
@@ -187,19 +215,24 @@ class SessionViewModel: ObservableObject {
         let url      = recordingURLs[device.id]
         let deviceId = device.id
         let cfg      = config
+        let geomArgs = windowGeometryArgs(for: service)
+        let folderName = recordingFolder.lastPathComponent
         recordingURLs.removeValue(forKey: deviceId)
         // Stop scrcpy (this finalises the recording file), then restart mirror.
         service.stop {
-            if let url, FileManager.default.fileExists(atPath: url.path) {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
-            }
-            service.start(deviceId: deviceId, config: cfg)
+            service.start(deviceId: deviceId, config: cfg, extraArgs: geomArgs)
+        }
+        Task {
+            recordingFeedback = "Recording saved to \(folderName)"
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            recordingFeedback = nil
         }
     }
 
-    // MARK: - Smart Config Change
+    // MARK: - Config Change (applied live — no scrcpy restart)
 
     private func handleConfigChange(from old: ScrcpyConfig, to new: ScrcpyConfig) {
+        // Stay Awake — instant via ADB.
         if old.stayAwake != new.stayAwake {
             let value = new.stayAwake ? "3" : "0"
             for (deviceId, service) in services where service.isRunning {
@@ -211,22 +244,33 @@ class SessionViewModel: ObservableObject {
             }
         }
 
-        let needsRestart = old.fps           != new.fps
-                        || old.bitrate       != new.bitrate
-                        || old.maxSize       != new.maxSize
-                        || old.turnScreenOff != new.turnScreenOff
-                        || old.enableAudio   != new.enableAudio
-                        || old.alwaysOnTop   != new.alwaysOnTop
-        guard needsRestart else { return }
-
-        setAudioOutputIfNeeded()
-        for (deviceId, service) in services where service.isRunning && !service.isRecording {
-            applyingConfigs.insert(deviceId)
-            service.stop {
-                service.start(deviceId: deviceId, config: new)
-                self.applyingConfigs.remove(deviceId)
+        // Turn Screen Off — instant via ADB keyevent.
+        // KEYCODE_SLEEP (223) = display off; KEYCODE_WAKEUP (224) = display on.
+        if old.turnScreenOff != new.turnScreenOff {
+            let keyevent = new.turnScreenOff ? "223" : "224"
+            for (deviceId, service) in services where service.isRunning {
+                Task {
+                    _ = try? await CommandRunner.run(executable: "adb",
+                        arguments: ["-s", deviceId, "shell", "input", "keyevent", keyevent])
+                }
             }
         }
+
+        // Always on Top — scrcpy must be launched with --always-on-top; it cannot be applied
+        // to a running process from outside (macOS SIP blocks cross-process window level changes).
+        // Capture the window geometry before stopping so we can reopen in the same position.
+        if old.alwaysOnTop != new.alwaysOnTop {
+            let cfg = new
+            for (deviceId, service) in services where service.isRunning && !service.isRecording {
+                let geomArgs = windowGeometryArgs(for: service)
+                service.stop {
+                    service.start(deviceId: deviceId, config: cfg, extraArgs: geomArgs)
+                }
+            }
+        }
+
+        // Audio, FPS, Bitrate, Max Size — H.264 stream parameters set at connection time.
+        // Cannot be changed mid-stream. Saved and applied on next mirror start.
     }
 
     // MARK: - Screenshot
@@ -236,8 +280,10 @@ class SessionViewModel: ObservableObject {
         Task {
             deviceVM.errorMessage = nil
             do {
-                let url = try await adb.screenshot(deviceId: device.id, to: folder)
-                NSWorkspace.shared.activateFileViewerSelecting([url])
+                _ = try await adb.screenshot(deviceId: device.id, to: folder)
+                screenshotFeedback = "Screenshot saved to \(folder.lastPathComponent)"
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                screenshotFeedback = nil
             } catch {
                 deviceVM.errorMessage = "Screenshot failed: \(error.localizedDescription)"
             }
@@ -254,6 +300,54 @@ class SessionViewModel: ObservableObject {
             deviceInfoCache[deviceId] = info
             fetchingDeviceInfo.remove(deviceId)
         }
+    }
+
+    // MARK: - Window Geometry
+
+    /// Returns scrcpy window-position flags for the given service so a restarted
+    /// session reopens in exactly the same place and size.
+    /// Picks the largest window owned by the scrcpy process (the video window,
+    /// not any SDL overlay or helper window).
+    private func windowGeometryArgs(for service: ScrcpyService) -> [String] {
+        guard let pid = service.processIdentifier,
+              let list = CGWindowListCopyWindowInfo(
+                  [.optionAll, .excludeDesktopElements], kCGNullWindowID
+              ) as? [[CFString: Any]]
+        else { return [] }
+
+        var bestRect = CGRect.zero
+        for info in list {
+            // PID may decode as Int or Int32 depending on bridging.
+            let ownerPID: Int32
+            if      let v = info[kCGWindowOwnerPID] as? Int32 { ownerPID = v }
+            else if let v = info[kCGWindowOwnerPID] as? Int   { ownerPID = Int32(v) }
+            else { continue }
+            guard ownerPID == pid else { continue }
+
+            // Read bounds directly from the dict — keys are plain strings "X","Y","Width","Height".
+            guard let bounds = info[kCGWindowBounds] as? [String: Any],
+                  let xN = bounds["X"]      as? NSNumber,
+                  let yN = bounds["Y"]      as? NSNumber,
+                  let wN = bounds["Width"]  as? NSNumber,
+                  let hN = bounds["Height"] as? NSNumber
+            else { continue }
+
+            let rect = CGRect(x: CGFloat(xN.doubleValue), y: CGFloat(yN.doubleValue),
+                              width: CGFloat(wN.doubleValue), height: CGFloat(hN.doubleValue))
+            // Keep the window with the largest area (that's the video window).
+            if rect.width * rect.height > bestRect.width * bestRect.height {
+                bestRect = rect
+            }
+        }
+
+        guard bestRect.width > 50, bestRect.height > 50 else { return [] }
+
+        return [
+            "--window-x=\(Int(bestRect.origin.x))",
+            "--window-y=\(Int(bestRect.origin.y))",
+            "--window-width=\(Int(bestRect.width))",
+            "--window-height=\(Int(bestRect.height))",
+        ]
     }
 
     // MARK: - Cleanup
